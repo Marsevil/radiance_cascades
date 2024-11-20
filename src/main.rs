@@ -2,30 +2,13 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use vulkano::{
-    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
-        allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
         AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
         RenderPassBeginInfo, SubpassBeginInfo, SubpassContents, SubpassEndInfo,
     },
-    image::{view::ImageView, Image, ImageUsage},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
-    pipeline::{
-        graphics::{
-            color_blend::{ColorBlendAttachmentState, ColorBlendState},
-            input_assembly::InputAssemblyState,
-            multisample::MultisampleState,
-            rasterization::RasterizationState,
-            vertex_input::{Vertex, VertexDefinition},
-            viewport::{Viewport, ViewportState},
-            GraphicsPipelineCreateInfo,
-        },
-        layout::PipelineDescriptorSetLayoutCreateInfo,
-        GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
-    },
-    render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
-    shader::ShaderModule,
-    swapchain::{self, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo},
+    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
+    swapchain::{self, SwapchainPresentInfo},
     sync::{self, GpuFuture},
     Validated, VulkanError,
 };
@@ -36,32 +19,10 @@ use winit::{
     window::Window,
 };
 
-mod vulkan_helper;
-
-mod vs {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/shaders/shader.vert",
-    }
-}
-mod fs {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/shaders/shader.frag",
-    }
-}
-
-#[derive(BufferContents, Vertex)]
-#[repr(C)]
-struct Vertex2D {
-    #[format(R32G32_SFLOAT)]
-    position: [f32; 2],
-}
-impl From<[f32; 2]> for Vertex2D {
-    fn from(value: [f32; 2]) -> Self {
-        Self { position: value }
-    }
-}
+use radiance_cascades::{
+    drawing::{context::DrawingContext, vulkan_helper},
+    geometry::Vertex2D,
+};
 
 fn new_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
     let window = Arc::new(
@@ -73,121 +34,16 @@ fn new_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
     window
 }
 
-fn get_swapchain(
-    window: &Window,
-    vk_ctx: &vulkan_helper::VulkanState,
-) -> (Arc<Swapchain>, Box<[Arc<Image>]>) {
-    let caps = vk_ctx
-        .physical_device
-        .surface_capabilities(&vk_ctx.surface, Default::default())
-        .expect("Failed to get surface capabilities");
-    let dimensions = window.inner_size();
-    let composite_alpha = caps.supported_composite_alpha.into_iter().next().unwrap();
-    let image_format = vk_ctx
-        .physical_device
-        .surface_formats(&vk_ctx.surface, Default::default())
-        .unwrap()[0]
-        .0;
-    let (swapchain, images) = Swapchain::new(
-        vk_ctx.device.clone(),
-        vk_ctx.surface.clone(),
-        SwapchainCreateInfo {
-            min_image_count: caps.min_image_count,
-            image_format,
-            image_extent: dimensions.into(),
-            image_usage: ImageUsage::COLOR_ATTACHMENT,
-            composite_alpha,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    (swapchain, images.into_boxed_slice())
-}
-
-fn get_framebuffers(
-    images: &[Arc<Image>],
-    render_pass: &Arc<RenderPass>,
-) -> Box<[Arc<Framebuffer>]> {
-    images
-        .iter()
-        .map(|image| {
-            let view = ImageView::new_default(image.clone()).unwrap();
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![view],
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        })
-        .collect::<Box<_>>()
-}
-
-fn get_pipeline(
-    viewport: Viewport,
-    vk_ctx: &vulkan_helper::VulkanState,
-    render_pass: Arc<RenderPass>,
-    vs: Arc<ShaderModule>,
-    fs: Arc<ShaderModule>,
-) -> Arc<GraphicsPipeline> {
-    let vs = vs.entry_point("main").unwrap();
-    let fs = fs.entry_point("main").unwrap();
-
-    let vertex_input_state = Vertex2D::per_vertex()
-        .definition(&vs.info().input_interface)
-        .unwrap();
-    let stages = [
-        PipelineShaderStageCreateInfo::new(vs),
-        PipelineShaderStageCreateInfo::new(fs),
-    ];
-    let layout = PipelineLayout::new(
-        vk_ctx.device.clone(),
-        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-            .into_pipeline_layout_create_info(vk_ctx.device.clone())
-            .unwrap(),
-    )
-    .unwrap();
-
-    let subpass = Subpass::from(render_pass, 0).unwrap();
-
-    GraphicsPipeline::new(
-        vk_ctx.device.clone(),
-        None,
-        GraphicsPipelineCreateInfo {
-            stages: stages.into_iter().collect(),
-            vertex_input_state: Some(vertex_input_state),
-            input_assembly_state: Some(InputAssemblyState::default()),
-            viewport_state: Some(ViewportState {
-                viewports: [viewport].into_iter().collect(),
-                ..Default::default()
-            }),
-            rasterization_state: Some(RasterizationState::default()),
-            multisample_state: Some(MultisampleState::default()),
-            color_blend_state: Some(ColorBlendState::with_attachment_states(
-                subpass.num_color_attachments(),
-                ColorBlendAttachmentState::default(),
-            )),
-            subpass: Some(subpass.into()),
-            ..GraphicsPipelineCreateInfo::layout(layout)
-        },
-    )
-    .unwrap()
-}
-
 fn get_command_buffers(
-    command_buffer_allocator: &StandardCommandBufferAllocator,
     vk_ctx: &vulkan_helper::VulkanState,
-    pipeline: Arc<GraphicsPipeline>,
+    ctx: &DrawingContext,
     vertex_buf: &Subbuffer<[Vertex2D]>,
-    framebuffers: &Box<[Arc<Framebuffer>]>,
 ) -> Box<[Arc<PrimaryAutoCommandBuffer>]> {
-    framebuffers
+    ctx.framebuffers
         .iter()
         .map(|framebuf| {
             let mut builder = AutoCommandBufferBuilder::primary(
-                command_buffer_allocator,
+                &ctx.command_buffer_allocator,
                 vk_ctx.graphics_queue_family_idx,
                 CommandBufferUsage::MultipleSubmit,
             )
@@ -204,7 +60,7 @@ fn get_command_buffers(
                         ..Default::default()
                     },
                 )
-                .and_then(|builder| builder.bind_pipeline_graphics(pipeline.clone()))
+                .and_then(|builder| builder.bind_pipeline_graphics(ctx.pipeline.clone()))
                 .and_then(|builder| builder.bind_vertex_buffers(0, vertex_buf.clone()))
                 .and_then(|builder| builder.draw(vertex_buf.len() as u32, 1, 0, 0))
                 .and_then(|builder| builder.end_render_pass(SubpassEndInfo::default()))
@@ -221,22 +77,13 @@ enum DrawingError {
     ObsoleteSwapchain,
 }
 
-struct DrawingContext {
-    vk_state: vulkan_helper::VulkanState,
-    window: Arc<Window>,
-    swapchain: Arc<Swapchain>,
-    framebuffers: Box<[Arc<Framebuffer>]>,
-    command_buffers: Box<[Arc<PrimaryAutoCommandBuffer>]>,
-    render_pass: Arc<RenderPass>,
-    vs: Arc<ShaderModule>,
-    fs: Arc<ShaderModule>,
-    command_buffer_allocator: StandardCommandBufferAllocator,
-    vertex_buf: Subbuffer<[Vertex2D]>,
-}
-
 #[derive(Default)]
 struct App {
+    window: Option<Arc<Window>>,
+    vk_state: Option<vulkan_helper::VulkanState>,
     ctx: Option<DrawingContext>,
+    command_buffers: Option<Box<[Arc<PrimaryAutoCommandBuffer>]>>,
+    vertex_buf: Option<Subbuffer<[Vertex2D]>>,
     window_resized: bool,
     need_recreate_swapchain: bool,
 }
@@ -276,34 +123,11 @@ impl ApplicationHandler for App {
 impl App {
     fn init(&mut self, event_loop: &ActiveEventLoop) {
         let window = new_window(event_loop);
-        let vk_ctx = vulkan_helper::VulkanState::new(event_loop, &window);
+        let vk_state = vulkan_helper::VulkanState::new(event_loop, &window);
+        let ctx = DrawingContext::new(&vk_state, &window);
 
-        let (swapchain, images) = get_swapchain(&window, &vk_ctx);
-
-        let render_pass = vulkano::single_pass_renderpass!(
-            vk_ctx.device.clone(),
-            attachments: {
-                color: {
-                    format: swapchain.image_format(),
-                    samples: 1,
-                    load_op: Clear,
-                    store_op: Store,
-                },
-
-            },
-            pass: {
-                color: [color],
-                depth_stencil: {},
-            },
-        )
-        .unwrap();
-
-        let framebufs = get_framebuffers(&images, &render_pass);
-
-        let memory_allocator =
-            Arc::new(StandardMemoryAllocator::new_default(vk_ctx.device.clone()));
         let vertex_buf = Buffer::from_iter(
-            memory_allocator.clone(),
+            ctx.buffer_allocator.clone(),
             BufferCreateInfo {
                 usage: BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
@@ -321,53 +145,20 @@ impl App {
         )
         .unwrap();
 
-        let vs = vs::load(vk_ctx.device.clone()).expect("Can't compile vertex shader");
-        let fs = fs::load(vk_ctx.device.clone()).expect("Can't compile fragment shader");
+        let command_buffers = get_command_buffers(&vk_state, &ctx, &vertex_buf);
 
-        let viewport = Viewport {
-            offset: [0.0, 0.0],
-            extent: window.inner_size().into(),
-            depth_range: 0.0..=1.0,
-        };
-
-        let pipeline = get_pipeline(
-            viewport,
-            &vk_ctx,
-            render_pass.clone(),
-            vs.clone(),
-            fs.clone(),
-        );
-
-        let command_buffer_allocator = StandardCommandBufferAllocator::new(
-            vk_ctx.device.clone(),
-            StandardCommandBufferAllocatorCreateInfo::default(),
-        );
-
-        let command_buffers = get_command_buffers(
-            &command_buffer_allocator,
-            &vk_ctx,
-            pipeline.clone(),
-            &vertex_buf,
-            &framebufs,
-        );
-
-        let ctx = DrawingContext {
-            vk_state: vk_ctx,
-            window,
-            swapchain,
-            command_buffers,
-            render_pass,
-            framebuffers: framebufs,
-            vs,
-            fs,
-            command_buffer_allocator,
-            vertex_buf,
-        };
+        self.window = Some(window);
+        self.vk_state = Some(vk_state);
         self.ctx = Some(ctx);
+        self.command_buffers = Some(command_buffers);
+        self.vertex_buf = Some(vertex_buf);
     }
 
     fn draw(&self) -> Result<(), DrawingError> {
+        let vk_state = self.vk_state.as_ref().unwrap();
         let ctx = self.ctx.as_ref().unwrap();
+        let command_buffers = self.command_buffers.as_ref().unwrap();
+
         let (image_idx, suboptimal, acquire_future) =
             match swapchain::acquire_next_image(ctx.swapchain.clone(), None)
                 .map_err(Validated::unwrap)
@@ -382,15 +173,15 @@ impl App {
             return Err(DrawingError::ObsoleteSwapchain);
         }
 
-        let exec = sync::now(ctx.vk_state.device.clone())
+        let exec = sync::now(vk_state.device.clone())
             .join(acquire_future)
             .then_execute(
-                ctx.vk_state.queue.clone(),
-                ctx.command_buffers[image_idx as usize].clone(),
+                vk_state.queue.clone(),
+                command_buffers[image_idx as usize].clone(),
             )
             .unwrap()
             .then_swapchain_present(
-                ctx.vk_state.queue.clone(),
+                vk_state.queue.clone(),
                 SwapchainPresentInfo::swapchain_image_index(ctx.swapchain.clone(), image_idx),
             )
             .then_signal_fence_and_flush();
@@ -403,46 +194,29 @@ impl App {
 
     fn recreate_swapchain(&mut self) {
         self.need_recreate_swapchain = false;
-        let ctx = self.ctx.as_mut().unwrap();
-        let new_dimensions = ctx.window.inner_size();
-        let (new_swapchain, new_images) = ctx
-            .swapchain
-            .recreate(SwapchainCreateInfo {
-                image_extent: new_dimensions.into(),
-                ..ctx.swapchain.create_info()
-            })
-            .expect("Failed to recreate swapchain {e");
 
-        let new_framebuffers = get_framebuffers(&new_images, &ctx.render_pass);
+        let window = self.window.as_ref().unwrap();
 
-        ctx.swapchain = new_swapchain;
-        ctx.framebuffers = new_framebuffers;
+        let mut ctx = self.ctx.take().unwrap();
+        ctx = ctx.revoke_swapchain(window);
+        self.ctx = Some(ctx);
     }
 
     fn resize_viewport(&mut self) {
         self.window_resized = false;
-        let ctx = self.ctx.as_mut().unwrap();
-        let viewport = Viewport {
-            offset: [0.0, 0.0],
-            extent: ctx.window.inner_size().into(),
-            depth_range: 0.0..=1.0,
-        };
-        let new_pipeline = get_pipeline(
-            viewport,
-            &ctx.vk_state,
-            ctx.render_pass.clone(),
-            ctx.vs.clone(),
-            ctx.fs.clone(),
-        );
-        let new_command_buffers = get_command_buffers(
-            &ctx.command_buffer_allocator,
-            &ctx.vk_state,
-            new_pipeline,
-            &ctx.vertex_buf,
-            &ctx.framebuffers.clone(),
-        );
 
-        ctx.command_buffers = new_command_buffers;
+        let window = self.window.as_ref().unwrap();
+        let vk_state = self.vk_state.as_ref().unwrap();
+        let vertex_buf = self.vertex_buf.as_ref().unwrap();
+
+        let mut ctx = self.ctx.take().unwrap();
+        ctx = ctx.revoke_swapchain(window);
+        ctx = ctx.resize_viewport(vk_state, window);
+
+        let new_command_buffers = get_command_buffers(vk_state, &ctx, vertex_buf);
+
+        self.ctx = Some(ctx);
+        self.command_buffers = Some(new_command_buffers);
     }
 }
 
