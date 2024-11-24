@@ -1,11 +1,14 @@
+use std::cell::RefCell;
 use std::sync::Arc;
 
+use rand::{thread_rng, Rng};
 use thiserror::Error;
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
-        AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
-        RenderPassBeginInfo, SubpassBeginInfo, SubpassContents, SubpassEndInfo,
+        AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, PrimaryAutoCommandBuffer,
+        PrimaryCommandBufferAbstract, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
+        SubpassEndInfo,
     },
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     swapchain::{self, SwapchainPresentInfo},
@@ -14,24 +17,22 @@ use vulkano::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
 
 use radiance_cascades::{
     drawing::{context::DrawingContext, vulkan_helper},
-    geometry::Vertex2D,
+    geometry::{Vertex2D, Vertex2DBuilder},
 };
 
 fn new_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
-    let window = Arc::new(
-        event_loop
-            .create_window(Window::default_attributes())
-            .expect("Can't create window"),
-    );
-
-    window
+    let window = event_loop
+        .create_window(Window::default_attributes())
+        .expect("Can't create window");
+    Arc::new(window)
 }
 
 fn get_command_buffers(
@@ -44,7 +45,7 @@ fn get_command_buffers(
         .map(|framebuf| {
             let mut builder = AutoCommandBufferBuilder::primary(
                 &ctx.command_buffer_allocator,
-                vk_ctx.graphics_queue_family_idx,
+                vk_ctx.queue.queue_family_index(),
                 CommandBufferUsage::MultipleSubmit,
             )
             .unwrap();
@@ -101,13 +102,18 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                let res = self.draw();
+                let res = self.render();
                 match res {
                     Err(DrawingError::ObsoleteSwapchain) => self.need_recreate_swapchain = true,
                     _ => {}
                 }
             }
             WindowEvent::Resized(_) => self.window_resized = true,
+            WindowEvent::KeyboardInput {
+                device_id: _,
+                event,
+                is_synthetic: _,
+            } => self.handle_input(event),
             _ => {}
         }
 
@@ -123,13 +129,24 @@ impl ApplicationHandler for App {
 impl App {
     fn init(&mut self, event_loop: &ActiveEventLoop) {
         let window = new_window(event_loop);
-        let vk_state = vulkan_helper::VulkanState::new(event_loop, &window);
+        let vk_state = vulkan_helper::VulkanState::new(&window);
         let ctx = DrawingContext::new(&vk_state, &window);
 
+        let vertexes = [
+            Vertex2DBuilder::new([-0.5, -0.5])
+                .color([1.0, 0.0, 0.0])
+                .build(),
+            Vertex2DBuilder::new([0.0, 0.5])
+                .color([0.0, 1.0, 0.0])
+                .build(),
+            Vertex2DBuilder::new([0.5, -0.25])
+                .color([0.0, 0.0, 1.0])
+                .build(),
+        ];
         let vertex_buf = Buffer::from_iter(
             ctx.buffer_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
+                usage: BufferUsage::VERTEX_BUFFER | BufferUsage::TRANSFER_DST,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -137,11 +154,7 @@ impl App {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![
-                Vertex2D::from([-0.5, -0.5]),
-                Vertex2D::from([0.0, 0.5]),
-                Vertex2D::from([0.5, -0.25]),
-            ],
+            vertexes,
         )
         .unwrap();
 
@@ -154,7 +167,7 @@ impl App {
         self.vertex_buf = Some(vertex_buf);
     }
 
-    fn draw(&self) -> Result<(), DrawingError> {
+    fn render(&self) -> Result<(), DrawingError> {
         let vk_state = self.vk_state.as_ref().unwrap();
         let ctx = self.ctx.as_ref().unwrap();
         let command_buffers = self.command_buffers.as_ref().unwrap();
@@ -179,17 +192,91 @@ impl App {
                 vk_state.queue.clone(),
                 command_buffers[image_idx as usize].clone(),
             )
-            .unwrap()
-            .then_swapchain_present(
-                vk_state.queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(ctx.swapchain.clone(), image_idx),
-            )
-            .then_signal_fence_and_flush();
+            .map(|fut| {
+                fut.then_swapchain_present(
+                    vk_state.queue.clone(),
+                    SwapchainPresentInfo::swapchain_image_index(ctx.swapchain.clone(), image_idx),
+                )
+            })
+            .map(|fut| fut.then_signal_fence_and_flush())
+            .unwrap();
 
         exec.and_then(|exec| exec.wait(None))
             .expect("Rendering failed");
 
         Ok(())
+    }
+
+    fn handle_input(&mut self, event: KeyEvent) {
+        let is_space: bool = event.physical_key == PhysicalKey::Code(KeyCode::Space);
+        let is_pressed: bool = event.state.is_pressed();
+        if !is_space || !is_pressed {
+            return;
+        }
+
+        let vk_state = self.vk_state.as_ref().unwrap();
+        let ctx = self.ctx.as_ref().unwrap();
+        let command_allocator = &ctx.command_buffer_allocator;
+
+        let rng = RefCell::new(thread_rng());
+        let gen_coords = || {
+            let mut rng = rng.borrow_mut();
+            [rng.gen_range(-1.0..1.0), rng.gen_range(-1.0..1.0)]
+        };
+        let gen_color = || {
+            let mut rng = rng.borrow_mut();
+            [rng.gen(), rng.gen(), rng.gen()]
+        };
+        let vertexes = [
+            Vertex2DBuilder::new(gen_coords())
+                .color(gen_color())
+                .build(),
+            Vertex2DBuilder::new(gen_coords())
+                .color(gen_color())
+                .build(),
+            Vertex2DBuilder::new(gen_coords())
+                .color(gen_color())
+                .build(),
+        ];
+        let vertex_buf = Buffer::from_iter(
+            ctx.buffer_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vertexes,
+        )
+        .unwrap();
+
+        let cmd = AutoCommandBufferBuilder::primary(
+            command_allocator,
+            vk_state.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .map(|mut builder| {
+            builder
+                .copy_buffer(CopyBufferInfo::buffers(
+                    vertex_buf,
+                    self.vertex_buf.as_ref().unwrap().clone(),
+                ))
+                .unwrap();
+            builder
+        })
+        .and_then(|builder| builder.build())
+        .unwrap();
+
+        cmd.execute(vk_state.queue.clone())
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .and_then(|fut| fut.wait(None))
+            .unwrap();
+
+        self.render().unwrap();
     }
 
     fn recreate_swapchain(&mut self) {

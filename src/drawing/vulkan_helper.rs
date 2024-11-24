@@ -9,11 +9,11 @@ use vulkano::{
     swapchain::Surface,
     VulkanLibrary,
 };
-use winit::{event_loop::ActiveEventLoop, window::Window};
+use winit::window::Window;
 
-fn get_vulkan_instance(event_loop: &ActiveEventLoop) -> Arc<Instance> {
+fn get_vulkan_instance(window: &Window) -> Arc<Instance> {
     let library = VulkanLibrary::new().expect("Vulkan library not found");
-    let extensions = Surface::required_extensions(event_loop);
+    let extensions = Surface::required_extensions(window);
     Instance::new(
         library,
         InstanceCreateInfo {
@@ -79,8 +79,8 @@ fn get_logical_device(
     (device, queue)
 }
 
+/// This struct contains all parts of vulkan API that are not changing.
 pub struct VulkanState {
-    pub graphics_queue_family_idx: u32,
     pub instance: Arc<Instance>,
     pub physical_device: Arc<PhysicalDevice>,
     pub device: Arc<Device>,
@@ -88,8 +88,8 @@ pub struct VulkanState {
     pub surface: Arc<Surface>,
 }
 impl VulkanState {
-    pub fn new(event_loop: &ActiveEventLoop, window: &Arc<Window>) -> Self {
-        let instance = get_vulkan_instance(event_loop);
+    pub fn new(window: &Arc<Window>) -> Self {
+        let instance = get_vulkan_instance(window);
         let surface = Surface::from_window(instance.clone(), window.clone())
             .expect("Unable to create vulkan surface");
         let enabled_extensions = DeviceExtensions {
@@ -105,7 +105,6 @@ impl VulkanState {
         );
 
         Self {
-            graphics_queue_family_idx: queue_family_idx,
             instance,
             physical_device,
             device,

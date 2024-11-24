@@ -21,7 +21,7 @@ use vulkano::{
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     shader::ShaderModule,
-    swapchain::{Swapchain, SwapchainCreateInfo},
+    swapchain::{PresentMode, Swapchain, SwapchainCreateInfo},
 };
 use winit::window::Window;
 
@@ -45,15 +45,28 @@ fn get_swapchain(
         .surface_formats(&vk_ctx.surface, Default::default())
         .unwrap()[0]
         .0;
+    let image_count = u32::min(
+        caps.min_image_count + 1,
+        caps.max_image_count.unwrap_or(u32::MAX),
+    );
+    let present_mode = if caps
+        .compatible_present_modes
+        .contains(&PresentMode::Mailbox)
+    {
+        PresentMode::Mailbox
+    } else {
+        PresentMode::Fifo
+    };
     let (swapchain, images) = Swapchain::new(
         vk_ctx.device.clone(),
         vk_ctx.surface.clone(),
         SwapchainCreateInfo {
-            min_image_count: caps.min_image_count,
+            min_image_count: image_count,
             image_format,
             image_extent: dimensions.into(),
             image_usage: ImageUsage::COLOR_ATTACHMENT,
             composite_alpha,
+            present_mode,
             ..Default::default()
         },
     )
@@ -155,7 +168,7 @@ impl DrawingContext {
         let vs = vs::load(vk_state.device.clone()).expect("Can't compile vertex shader");
         let fs = fs::load(vk_state.device.clone()).expect("Can't compile fragment shader");
 
-        let (swapchain, images) = get_swapchain(window, &vk_state);
+        let (swapchain, images) = get_swapchain(window, vk_state);
         let render_pass = vulkano::single_pass_renderpass!(
             vk_state.device.clone(),
             attachments: {
@@ -181,7 +194,7 @@ impl DrawingContext {
         };
         let pipeline = get_pipeline(
             viewport,
-            &vk_state,
+            vk_state,
             render_pass.clone(),
             vs.clone(),
             fs.clone(),
