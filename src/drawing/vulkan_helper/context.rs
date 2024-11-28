@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
 use vulkano::{
+    buffer::{
+        allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo},
+        BufferUsage,
+    },
     command_buffer::allocator::{
         StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
     },
     image::{view::ImageView, Image, ImageUsage},
-    memory::allocator::StandardMemoryAllocator,
+    memory::allocator::{MemoryTypeFilter, StandardMemoryAllocator},
     pipeline::{
         graphics::{
             color_blend::{ColorBlendAttachmentState, ColorBlendState},
@@ -26,14 +30,11 @@ use vulkano::{
 use winit::window::Window;
 
 use crate::{
-    drawing::{fs, vs, vulkan_helper},
-    geometry::Vertex2D,
+    drawing::{fs, vs, vulkan_helper::VulkanCore},
+    geometry::vertex::Vertex2D,
 };
 
-fn get_swapchain(
-    window: &Window,
-    vk_ctx: &vulkan_helper::VulkanState,
-) -> (Arc<Swapchain>, Box<[Arc<Image>]>) {
+fn get_swapchain(window: &Window, vk_ctx: &VulkanCore) -> (Arc<Swapchain>, Box<[Arc<Image>]>) {
     let caps = vk_ctx
         .physical_device
         .surface_capabilities(&vk_ctx.surface, Default::default())
@@ -97,7 +98,7 @@ fn get_framebuffers(
 
 fn get_pipeline(
     viewport: Viewport,
-    vk_ctx: &vulkan_helper::VulkanState,
+    vk_ctx: &VulkanCore,
     render_pass: Arc<RenderPass>,
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
@@ -146,8 +147,9 @@ fn get_pipeline(
     .unwrap()
 }
 
-pub struct DrawingContext {
+pub struct VulkanContext {
     pub command_buffer_allocator: StandardCommandBufferAllocator,
+    pub uniform_buffer_allocator: SubbufferAllocator,
     pub buffer_allocator: Arc<StandardMemoryAllocator>,
     pub swapchain: Arc<Swapchain>,
     pub framebuffers: Box<[Arc<Framebuffer>]>,
@@ -156,14 +158,23 @@ pub struct DrawingContext {
     pub vs: Arc<ShaderModule>,
     pub fs: Arc<ShaderModule>,
 }
-impl DrawingContext {
-    pub fn new(vk_state: &vulkan_helper::VulkanState, window: &Window) -> Self {
+impl VulkanContext {
+    pub fn new(vk_state: &VulkanCore, window: &Window) -> Self {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(
             vk_state.device.clone(),
         ));
         let command_buffer_allocator = StandardCommandBufferAllocator::new(
             vk_state.device.clone(),
             StandardCommandBufferAllocatorCreateInfo::default(),
+        );
+        let uniform_buffer_allocator = SubbufferAllocator::new(
+            memory_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
         );
         let vs = vs::load(vk_state.device.clone()).expect("Can't compile vertex shader");
         let fs = fs::load(vk_state.device.clone()).expect("Can't compile fragment shader");
@@ -200,9 +211,10 @@ impl DrawingContext {
             fs.clone(),
         );
 
-        DrawingContext {
+        VulkanContext {
             command_buffer_allocator,
             buffer_allocator: memory_allocator,
+            uniform_buffer_allocator,
             swapchain,
             pipeline,
             render_pass,
@@ -231,7 +243,7 @@ impl DrawingContext {
         }
     }
 
-    pub fn resize_viewport(self, vk_state: &vulkan_helper::VulkanState, window: &Window) -> Self {
+    pub fn resize_viewport(self, vk_state: &VulkanCore, window: &Window) -> Self {
         let viewport = Viewport {
             offset: [0.0, 0.0],
             extent: window.inner_size().into(),

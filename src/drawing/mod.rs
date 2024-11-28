@@ -1,4 +1,6 @@
-pub mod context;
+pub mod error;
+pub mod objects;
+pub mod renderer;
 pub mod vulkan_helper;
 
 pub mod vs {

@@ -80,17 +80,17 @@ fn get_logical_device(
 }
 
 /// This struct contains all parts of vulkan API that are not changing.
-pub struct VulkanState {
+pub struct VulkanCore {
     pub instance: Arc<Instance>,
     pub physical_device: Arc<PhysicalDevice>,
     pub device: Arc<Device>,
     pub queue: Arc<Queue>,
     pub surface: Arc<Surface>,
 }
-impl VulkanState {
-    pub fn new(window: &Arc<Window>) -> Self {
-        let instance = get_vulkan_instance(window);
-        let surface = Surface::from_window(instance.clone(), window.clone())
+impl VulkanCore {
+    pub fn new(window: Arc<Window>) -> Self {
+        let instance = get_vulkan_instance(&window);
+        let surface = Surface::from_window(instance.clone(), window)
             .expect("Unable to create vulkan surface");
         let enabled_extensions = DeviceExtensions {
             khr_swapchain: true,
